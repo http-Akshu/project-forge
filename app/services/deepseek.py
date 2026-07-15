@@ -95,63 +95,106 @@ class DeepSeekService:
         model: str | None = None,
         temperature: float = 0.1,
         max_tokens: int | None = None,
+        maximum_attempts: int = 3,
     ) -> dict[str, Any]:
         selected_model = model or self.settings.deepseek_default_model
+        selected_max_tokens = (
+            max_tokens or self.settings.max_output_tokens
+        )
 
         json_system_prompt = (
             f"{system_prompt}\n\n"
-            "Return only one valid JSON object. "
-            "Do not use Markdown fences or add commentary."
+            "Return exactly one valid JSON object. "
+            "Do not use Markdown fences. "
+            "Do not add commentary before or after the JSON. "
+            "Ensure every string, array, and object is completely closed."
         )
 
-        try:
-            response = self.client.chat.completions.create(
-                model=selected_model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": json_system_prompt,
-                    },
-                    {
-                        "role": "user",
-                        "content": user_prompt,
-                    },
-                ],
-                response_format={"type": "json_object"},
-                temperature=temperature,
-                max_tokens=max_tokens or self.settings.max_output_tokens,
-                stream=False,
-            )
+        last_error: Exception | None = None
+        previous_invalid_content = ""
 
-            content = response.choices[0].message.content
+        for attempt in range(1, maximum_attempts + 1):
+            retry_instruction = ""
 
-            if not content:
-                raise DeepSeekServiceError(
-                    "DeepSeek returned empty JSON content."
+            if attempt > 1:
+                retry_instruction = (
+                    "\n\nYour previous response was invalid or truncated JSON. "
+                    "Return the complete JSON again from the beginning. "
+                    "Reduce unnecessary prose and keep file contents concise. "
+                    "Do not continue from the truncated response."
                 )
 
-            parsed = json.loads(content)
+                if previous_invalid_content:
+                    retry_instruction += (
+                        "\nThe previous response ended near this text:\n"
+                        f"{previous_invalid_content[-1000:]}"
+                    )
 
-            if not isinstance(parsed, dict):
-                raise DeepSeekServiceError(
-                    "DeepSeek JSON response was not an object."
+            try:
+                response = self.client.chat.completions.create(
+                    model=selected_model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": json_system_prompt,
+                        },
+                        {
+                            "role": "user",
+                            "content": (
+                                user_prompt + retry_instruction
+                            ),
+                        },
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=temperature,
+                    max_tokens=selected_max_tokens,
+                    stream=False,
                 )
 
-            return parsed
+                content = response.choices[0].message.content
 
-        except json.JSONDecodeError as exc:
-            raise DeepSeekServiceError(
-                "DeepSeek returned invalid JSON."
-            ) from exc
+                if not content:
+                    last_error = DeepSeekServiceError(
+                        "DeepSeek returned empty JSON content."
+                    )
+                    continue
 
-        except (
-            RateLimitError,
-            APIConnectionError,
-            APIStatusError,
-        ) as exc:
+                previous_invalid_content = content
+
+                try:
+                    parsed = json.loads(content)
+                except json.JSONDecodeError as exc:
+                    last_error = exc
+                    continue
+
+                if not isinstance(parsed, dict):
+                    last_error = DeepSeekServiceError(
+                        "DeepSeek JSON response was not an object."
+                    )
+                    continue
+
+                return parsed
+
+            except (
+                RateLimitError,
+                APIConnectionError,
+                APIStatusError,
+            ) as exc:
+                last_error = exc
+
+                if attempt == maximum_attempts:
+                    break
+
+        if isinstance(last_error, json.JSONDecodeError):
             raise DeepSeekServiceError(
-                f"DeepSeek request failed: {exc}"
-            ) from exc
+                "DeepSeek returned invalid or truncated JSON "
+                f"after {maximum_attempts} attempts."
+            ) from last_error
+
+        raise DeepSeekServiceError(
+            f"DeepSeek request failed after "
+            f"{maximum_attempts} attempts: {last_error}"
+        ) from last_error
 
     def generate_structured(
         self,

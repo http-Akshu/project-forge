@@ -62,6 +62,19 @@ class DevelopmentPlan(BaseModel):
     def validate_commit_message(cls, value: str) -> str:
         cleaned = value.strip()
 
+        prefix_replacements = {
+            "setup:": "chore:",
+            "feature:": "feat:",
+            "bugfix:": "fix:",
+            "documentation:": "docs:",
+            "testing:": "test:",
+        }
+
+        for invalid_prefix, valid_prefix in prefix_replacements.items():
+            if cleaned.lower().startswith(invalid_prefix):
+                cleaned = valid_prefix + cleaned[len(invalid_prefix):]
+                break
+
         allowed_prefixes = (
             "feat:",
             "fix:",

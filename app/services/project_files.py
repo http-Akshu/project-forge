@@ -41,12 +41,14 @@ class ProjectFileService:
         "",
         ".css",
         ".csv",
+        ".cts",
         ".html",
         ".js",
         ".json",
         ".jsx",
         ".md",
         ".mjs",
+        ".mts",
         ".py",
         ".sql",
         ".toml",
@@ -148,9 +150,9 @@ class ProjectFileService:
     def read_project_context(
         self,
         *,
-        maximum_files: int = 30,
-        maximum_characters_per_file: int = 20_000,
-        maximum_total_characters: int = 120_000,
+        maximum_files: int = 18,
+        maximum_characters_per_file: int = 12_000,
+        maximum_total_characters: int = 60_000,
     ) -> dict[str, str]:
         context: dict[str, str] = {}
         total_characters = 0

@@ -82,3 +82,23 @@ def test_rejects_potential_secret(tmp_path: Path) -> None:
         match="Potential secret",
     ):
         service.apply_changes([change])
+
+def test_allows_typescript_module_config(tmp_path: Path) -> None:
+    service = ProjectFileService(
+        project_directory=tmp_path
+    )
+
+    change = PlannedFileChange(
+        path="vitest.config.mts",
+        operation=FileOperation.CREATE,
+        content=(
+            'import { defineConfig } from "vitest/config";\n\n'
+            "export default defineConfig({});\n"
+        ),
+        explanation="Add Vitest configuration.",
+    )
+
+    applied = service.apply_changes([change])
+
+    assert len(applied) == 1
+    assert (tmp_path / "vitest.config.mts").exists()

@@ -3,6 +3,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -106,6 +107,11 @@ class DeveloperAgent:
 
         try:
             changed_files = file_service.apply_changes(plan.files)
+
+            self._install_dependencies_if_needed(
+                project_directory=project_directory,
+                changed_files=changed_files,
+            )
 
             validation_commands = self._validation_commands(
                 project_directory
@@ -240,6 +246,31 @@ Rules:
 - Update documentation when the task is documentation or planning work.
 - Do not modify package-lock.json manually.
 - The commit message must use conventional commit format.
+- Prefer changing no more than 5 files in one task.
+- Keep generated documentation concise.
+- Avoid returning unchanged files.
+- Do not repeat large existing file contents unless the file must change.
+- If the task is too large, implement the smallest complete portion that satisfies the acceptance criteria.
+- Commit messages may only begin with feat:, fix:, docs:, test:, refactor:, chore:, style:, or perf:.
+- When adding an npm package, update package.json but never edit package-lock.json manually.
+- If tests require a new package, include it in devDependencies.
+- For feature and bug-fix tasks, create or update relevant tests whenever practical.
+- Setup and documentation tasks may pass when no tests exist yet.
+- Never guess npm package versions.
+- When adding a dependency, use an existing stable version.
+- Prefer omitting the version from installation decisions unless the repository already pins versions.
+- Do not use prerelease, beta, canary, or release-candidate versions.
+- Before finalizing package.json, ensure every requested dependency version exists in the npm registry.
+- If using @libsql/client, use the current stable npm version verified from the registry. Do not use ^0.14.2.
+- Every local import added by the plan must resolve to an existing file or a file included in the same plan.
+- Before returning the plan, verify all @/, relative, and component imports.
+- When generating shadcn/ui-style components that import "@/lib/utils", create src/lib/utils.ts if it does not already exist.
+- Include every required npm dependency in package.json.
+- Never assume helper files already exist without checking the supplied repository context.
+- Never pass plain SQL strings directly to Drizzle ORM methods.
+- For Drizzle raw SQL queries, import and use the sql template from "drizzle-orm".
+- Verify generated tests against the actual APIs of the installed libraries.
+- Do not assume ORM methods accept raw strings unless the current library documentation confirms it.
 """
 
         user_prompt = f"""
@@ -266,6 +297,15 @@ ACCEPTANCE CRITERIA:
 
 CURRENT REPOSITORY FILES:
 {formatted_context}
+
+OUTPUT SIZE RULES:
+- Return no more than 5 file operations.
+- Keep each generated file focused and concise.
+- Do not include files that do not require changes.
+IMPORT VALIDATION RULES:
+- Check every import in every generated file.
+- Any missing local imported module must be created in the same response.
+- For the current Next.js alias, "@/..." resolves inside the src directory.
 
 Return this exact JSON structure:
 
@@ -306,6 +346,156 @@ Do not wrap the JSON in Markdown.
                 f"{exc}"
             ) from exc
 
+    def _install_dependencies_if_needed(
+        self,
+        *,
+        project_directory: Path,
+        changed_files: list[AppliedFileChange],
+    ) -> None:
+        changed_relative_paths = {
+            change.path.relative_to(project_directory).as_posix()
+            for change in changed_files
+        }
+
+        if "package.json" not in changed_relative_paths:
+            return
+
+        npm = "npm.cmd" if os.name == "nt" else "npm"
+        package_json_path = project_directory / "package.json"
+
+        self._validate_npm_dependencies(
+            project_directory=project_directory,
+            package_json_path=package_json_path,
+            npm=npm,
+        )
+
+        self.command_runner.run(
+            [npm, "install"],
+            working_directory=project_directory,
+            timeout_seconds=1200,
+        )        
+
+    def _validate_npm_dependencies(
+        self,
+        *,
+        project_directory: Path,
+        package_json_path: Path,
+        npm: str,
+    ) -> None:
+        try:
+            package_data: dict[str, Any] = json.loads(
+                package_json_path.read_text(encoding="utf-8")
+            )
+        except json.JSONDecodeError as exc:
+            raise DeveloperAgentError(
+                "Generated package.json contains invalid JSON."
+            ) from exc
+
+        dependency_groups = (
+            "dependencies",
+            "devDependencies",
+            "peerDependencies",
+        )
+
+        for group_name in dependency_groups:
+            dependencies = package_data.get(group_name, {})
+
+            if not isinstance(dependencies, dict):
+                raise DeveloperAgentError(
+                    f"{group_name} must be a JSON object."
+                )
+
+            for package_name, requested_version in list(
+                dependencies.items()
+            ):
+                if not isinstance(requested_version, str):
+                    raise DeveloperAgentError(
+                        f"Invalid version for npm package {package_name}."
+                    )
+
+                if self._should_skip_registry_validation(
+                    requested_version
+                ):
+                    continue
+
+                result = self.command_runner.run(
+                    [
+                        npm,
+                        "view",
+                        f"{package_name}@{requested_version}",
+                        "version",
+                        "--json",
+                    ],
+                    working_directory=project_directory,
+                    timeout_seconds=120,
+                    check=False,
+                )
+
+                if result.return_code == 0:
+                    continue
+
+                latest_result = self.command_runner.run(
+                    [
+                        npm,
+                        "view",
+                        package_name,
+                        "version",
+                        "--json",
+                    ],
+                    working_directory=project_directory,
+                    timeout_seconds=120,
+                    check=False,
+                )
+
+                if latest_result.return_code != 0:
+                    raise DeveloperAgentError(
+                        "Could not determine a valid npm version for "
+                        f"{package_name}."
+                    )
+
+                try:
+                    latest_version = json.loads(
+                        latest_result.stdout
+                    )
+                except json.JSONDecodeError as exc:
+                    raise DeveloperAgentError(
+                        "npm returned an invalid version response for "
+                        f"{package_name}."
+                    ) from exc
+
+                if (
+                    not isinstance(latest_version, str)
+                    or not latest_version.strip()
+                ):
+                    raise DeveloperAgentError(
+                        "npm did not return a usable version for "
+                        f"{package_name}."
+                    )
+
+                dependencies[package_name] = f"^{latest_version}"
+
+        package_json_path.write_text(
+            json.dumps(package_data, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _should_skip_registry_validation(
+        requested_version: str,
+    ) -> bool:
+        prefixes = (
+            "file:",
+            "git:",
+            "git+",
+            "github:",
+            "http:",
+            "https:",
+            "workspace:",
+            "link:",
+        )
+
+        return requested_version.startswith(prefixes)
+
     def _validation_commands(
         self,
         project_directory: Path,
@@ -328,7 +518,15 @@ Do not wrap the JSON in Markdown.
                 commands.append([npm, "run", "lint"])
 
             if "test" in scripts:
-                commands.append([npm, "test", "--", "--run"])
+                commands.append(
+                    [
+                        npm,
+                        "test",
+                        "--",
+                        "--run",
+                        "--passWithNoTests",
+                    ]
+                )
 
             if "build" in scripts:
                 commands.append([npm, "run", "build"])
@@ -387,10 +585,30 @@ Do not wrap the JSON in Markdown.
             working_directory=project_directory,
         )
 
-        if result.stdout.strip():
+        changed_lines = [
+            line.strip()
+            for line in result.stdout.splitlines()
+            if line.strip()
+        ]
+
+        allowed_changes = {
+            "M PROJECTFORGE_TASK.md",
+            "M  PROJECTFORGE_TASK.md",
+            " M PROJECTFORGE_TASK.md",
+        }
+
+        unexpected_changes = [
+            line
+            for line in changed_lines
+            if line not in allowed_changes
+        ]
+
+        if unexpected_changes:
+            formatted_changes = "\n".join(unexpected_changes)
+
             raise DeveloperAgentError(
-                "Generated project has uncommitted changes. "
-                "Commit, discard, or review them before running the agent."
+                "Generated project contains unexpected uncommitted changes:\n"
+                f"{formatted_changes}"
             )
 
     def _commit_changes(
