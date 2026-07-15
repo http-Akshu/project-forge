@@ -571,6 +571,9 @@ Do not wrap the JSON in Markdown.
     - For npm dependencies, update package.json but never package-lock.json.
     - Never guess nonexistent package versions.
     - Keep the repair focused and concise.
+    - Before choosing create or update, check whether the file exists in the supplied repository context.
+    - Existing files must use update.
+    - Missing files must use create.
     """
 
         user_prompt = f"""

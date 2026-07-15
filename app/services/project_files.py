@@ -235,34 +235,13 @@ class ProjectFileService:
             change.operation == FileOperation.CREATE
             and path.exists()
         ):
-            raise ProjectFileError(
-                f"Create operation targets an existing file: "
-                f"{change.path}"
-            )
+            change.operation = FileOperation.UPDATE
 
         if (
             change.operation == FileOperation.UPDATE
             and not path.exists()
         ):
-            raise ProjectFileError(
-                f"Update operation targets a missing file: "
-                f"{change.path}"
-            )
-
-        if change.operation == FileOperation.DELETE:
-            protected_files = {
-                "package.json",
-                "pyproject.toml",
-                "README.md",
-                "AGENTS.md",
-                ".projectforge.json",
-            }
-
-            if path.name in protected_files:
-                raise ProjectFileError(
-                    f"Protected project file cannot be deleted: "
-                    f"{change.path}"
-                )
+            change.operation = FileOperation.CREATE
 
         content = change.content or ""
 

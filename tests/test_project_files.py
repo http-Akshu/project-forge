@@ -102,3 +102,53 @@ def test_allows_typescript_module_config(tmp_path: Path) -> None:
 
     assert len(applied) == 1
     assert (tmp_path / "vitest.config.mts").exists()
+
+def test_converts_create_to_update_for_existing_file(
+    tmp_path: Path,
+) -> None:
+    existing_file = tmp_path / "src" / "db" / "schema.ts"
+    existing_file.parent.mkdir(parents=True)
+    existing_file.write_text(
+        "export const original = true;\n",
+        encoding="utf-8",
+    )
+
+    service = ProjectFileService(
+        project_directory=tmp_path
+    )
+
+    change = PlannedFileChange(
+        path="src/db/schema.ts",
+        operation=FileOperation.CREATE,
+        content="export const updated = true;\n",
+        explanation="Extend the existing database schema.",
+    )
+
+    applied = service.apply_changes([change])
+
+    assert applied[0].operation == FileOperation.UPDATE
+    assert existing_file.read_text(
+        encoding="utf-8"
+    ) == "export const updated = true;\n"
+
+
+def test_converts_update_to_create_for_missing_file(
+    tmp_path: Path,
+) -> None:
+    service = ProjectFileService(
+        project_directory=tmp_path
+    )
+
+    change = PlannedFileChange(
+        path="src/lib/new-file.ts",
+        operation=FileOperation.UPDATE,
+        content="export const created = true;\n",
+        explanation="Create the missing project helper.",
+    )
+
+    applied = service.apply_changes([change])
+
+    assert applied[0].operation == FileOperation.CREATE
+    assert (
+        tmp_path / "src" / "lib" / "new-file.ts"
+    ).exists()
