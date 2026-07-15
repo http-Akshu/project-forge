@@ -92,3 +92,8 @@ class DevelopmentPlan(BaseModel):
             )
 
         return cleaned
+
+class RepairPlan(BaseModel):
+    summary: str = Field(min_length=10, max_length=1000)
+    files: list[PlannedFileChange] = Field(min_length=1, max_length=10)
+    diagnosis: str = Field(min_length=10, max_length=2000)

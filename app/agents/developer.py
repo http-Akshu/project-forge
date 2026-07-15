@@ -11,10 +11,12 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.state import ProjectStatus, TaskStatus
 from app.database.models import Project, ProjectTask
-from app.schemas.code_change import DevelopmentPlan
+from app.schemas.code_change import DevelopmentPlan, RepairPlan
 from app.services.command_runner import (
     CommandExecutionError,
     CommandRunner,
+    ValidationFailure,
+    ValidationResult,
 )
 from app.services.deepseek import DeepSeekService
 from app.services.project_files import (
@@ -117,10 +119,31 @@ class DeveloperAgent:
                 project_directory
             )
 
-            self._run_validation(
+            validation_result = self._run_validation(
                 project_directory=project_directory,
                 commands=validation_commands,
             )
+
+            repair_changes: list[AppliedFileChange] = []
+
+            if not validation_result.successful:
+                if validation_result.failure is None:
+                    raise DeveloperAgentError(
+                        "Validation failed without failure information."
+                    )
+
+                repair_changes, validation_result = (
+                    self._repair_until_valid(
+                        project=project,
+                        task=task,
+                        project_directory=project_directory,
+                        file_service=file_service,
+                        validation_commands=validation_commands,
+                        initial_failure=validation_result.failure,
+                    )
+                )
+
+            changed_files.extend(repair_changes)
 
             task.status = TaskStatus.COMPLETED.value
             task.completed_at = datetime.now(timezone.utc)
@@ -178,7 +201,7 @@ class DeveloperAgent:
 
         except Exception as exc:
             task.status = TaskStatus.FAILED.value
-            task.repair_attempts += 1
+            task.repair_attempts = self.settings.max_repair_attempts
             task.last_error = str(exc)
 
             project.current_phase = (
@@ -496,6 +519,179 @@ Do not wrap the JSON in Markdown.
 
         return requested_version.startswith(prefixes)
 
+    def _generate_repair_plan(
+        self,
+        *,
+        project: Project,
+        task: ProjectTask,
+        project_directory: Path,
+        failure: ValidationFailure,
+        attempt_number: int,
+    ) -> RepairPlan:
+        file_service = ProjectFileService(
+            project_directory=project_directory
+        )
+
+        context = file_service.read_project_context(
+            maximum_files=20,
+            maximum_characters_per_file=14_000,
+            maximum_total_characters=70_000,
+        )
+
+        formatted_context = "\n\n".join(
+            f"--- FILE: {path} ---\n{content}"
+            for path, content in context.items()
+        )
+
+        failure_output = failure.combined_output
+
+        if len(failure_output) > 20_000:
+            failure_output = failure_output[-20_000:]
+
+        system_prompt = """
+    You are the repair engineer inside ProjectForge.
+
+    A generated software change failed validation. Diagnose the exact failure
+    and produce the smallest safe set of file changes required to fix it.
+
+    Rules:
+    - Fix only the reported validation failure.
+    - Preserve the current task requirements.
+    - Do not rewrite unrelated files.
+    - Return complete file contents, not diffs.
+    - Every local import must resolve.
+    - Do not remove tests merely to make validation pass.
+    - Do not disable TypeScript, linting, or test rules.
+    - Do not use @ts-ignore, eslint-disable, or test skipping unless the existing
+    project already uses it for a justified reason.
+    - Never include secrets or modify .env files.
+    - Use create only for missing files.
+    - Use update only for existing files.
+    - Check the supplied repository context before deciding whether files exist.
+    - For npm dependencies, update package.json but never package-lock.json.
+    - Never guess nonexistent package versions.
+    - Keep the repair focused and concise.
+    """
+
+        user_prompt = f"""
+    PROJECT:
+    {project.title}
+
+    TASK:
+    Task {task.position}: {task.title}
+
+    TASK DESCRIPTION:
+    {task.description}
+
+    REPAIR ATTEMPT:
+    {attempt_number}
+
+    FAILED COMMAND:
+    {" ".join(failure.command)}
+
+    EXIT CODE:
+    {failure.return_code}
+
+    VALIDATION OUTPUT:
+    {failure_output}
+
+    CURRENT REPOSITORY:
+    {formatted_context}
+
+    Return this exact JSON structure:
+
+    {{
+    "diagnosis": "Exact technical cause of the failure",
+    "summary": "How the repair resolves the failure",
+    "files": [
+        {{
+        "path": "relative/path/to/file",
+        "operation": "update",
+        "content": "Complete corrected file contents",
+        "explanation": "Why this change fixes the failure"
+        }}
+    ]
+    }}
+
+    Allowed operations:
+    - create
+    - update
+    - delete
+
+    Return no more than 6 file operations.
+    Do not wrap the JSON in Markdown.
+    """
+
+        try:
+            return self.deepseek.generate_structured(
+                schema=RepairPlan,
+                system_prompt=system_prompt.strip(),
+                user_prompt=user_prompt.strip(),
+                model=self.settings.deepseek_default_model,
+            )
+        except Exception as exc:
+            raise DeveloperAgentError(
+                f"DeepSeek could not create a repair plan: {exc}"
+            ) from exc
+
+    def _repair_until_valid(
+        self,
+        *,
+        project: Project,
+        task: ProjectTask,
+        project_directory: Path,
+        file_service: ProjectFileService,
+        validation_commands: list[list[str]],
+        initial_failure: ValidationFailure,
+    ) -> tuple[list[AppliedFileChange], ValidationResult]:
+        all_repair_changes: list[AppliedFileChange] = []
+        current_failure = initial_failure
+
+        for attempt_number in range(
+            1,
+            self.settings.max_repair_attempts + 1,
+        ):
+            repair_plan = self._generate_repair_plan(
+                project=project,
+                task=task,
+                project_directory=project_directory,
+                failure=current_failure,
+                attempt_number=attempt_number,
+            )
+
+            repair_changes = file_service.apply_changes(
+                repair_plan.files
+            )
+
+            all_repair_changes.extend(repair_changes)
+
+            self._install_dependencies_if_needed(
+                project_directory=project_directory,
+                changed_files=repair_changes,
+            )
+
+            validation_result = self._run_validation(
+                project_directory=project_directory,
+                commands=validation_commands,
+            )
+
+            if validation_result.successful:
+                return all_repair_changes, validation_result
+
+            if validation_result.failure is None:
+                raise DeveloperAgentError(
+                    "Validation failed without returning failure details."
+                )
+
+            current_failure = validation_result.failure
+
+        raise DeveloperAgentError(
+            "Validation still failed after "
+            f"{self.settings.max_repair_attempts} repair attempts.\n\n"
+            f"Last failed command: {' '.join(current_failure.command)}\n\n"
+            f"{current_failure.combined_output}"
+        )
+
     def _validation_commands(
         self,
         project_directory: Path,
@@ -568,13 +764,35 @@ Do not wrap the JSON in Markdown.
         *,
         project_directory: Path,
         commands: list[list[str]],
-    ) -> None:
+    ) -> ValidationResult:
+        completed_commands = []
+
         for command in commands:
-            self.command_runner.run(
+            result = self.command_runner.run(
                 command,
                 working_directory=project_directory,
                 timeout_seconds=1200,
+                check=False,
             )
+
+            completed_commands.append(result)
+
+            if result.return_code != 0:
+                return ValidationResult(
+                    successful=False,
+                    completed_commands=completed_commands,
+                    failure=ValidationFailure(
+                        command=result.command,
+                        return_code=result.return_code,
+                        stdout=result.stdout,
+                        stderr=result.stderr,
+                    ),
+                )
+
+        return ValidationResult(
+            successful=True,
+            completed_commands=completed_commands,
+        )
 
     def _ensure_clean_git_worktree(
         self,
@@ -731,7 +949,15 @@ Do not wrap the JSON in Markdown.
 
 """
 
+        seen_changes: set[tuple[str, str]] = set()
+
         for change in plan.files:
+            key = (change.path, change.operation.value)
+
+            if key in seen_changes:
+                continue
+
+            seen_changes.add(key)
             entry += (
                 f"- `{change.path}` — "
                 f"{change.operation.value}: "

@@ -100,3 +100,27 @@ class CommandRunner:
             )
 
         return result
+
+@dataclass(frozen=True)
+class ValidationFailure:
+    command: list[str]
+    return_code: int
+    stdout: str
+    stderr: str
+
+    @property
+    def combined_output(self) -> str:
+        parts = [
+            part.strip()
+            for part in (self.stdout, self.stderr)
+            if part.strip()
+        ]
+
+        return "\n\n".join(parts)
+
+
+@dataclass(frozen=True)
+class ValidationResult:
+    successful: bool
+    completed_commands: list[CommandResult]
+    failure: ValidationFailure | None = None
