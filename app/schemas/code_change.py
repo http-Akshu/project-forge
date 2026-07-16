@@ -13,7 +13,7 @@ class PlannedFileChange(BaseModel):
     path: str = Field(min_length=1, max_length=300)
     operation: FileOperation
     content: str | None = None
-    explanation: str = Field(min_length=5, max_length=500)
+    explanation: str = Field(min_length=5, max_length=1000)
 
     @field_validator("path")
     @classmethod
@@ -28,6 +28,19 @@ class PlannedFileChange(BaseModel):
 
         if ".." in cleaned.split("/"):
             raise ValueError("Parent-directory traversal is not allowed.")
+
+        return cleaned
+
+    @field_validator("explanation", mode="before")
+    @classmethod
+    def normalize_explanation(cls, value: object) -> str:
+        if not isinstance(value, str):
+            raise ValueError("Explanation must be text.")
+
+        cleaned = value.strip()
+
+        if len(cleaned) > 1000:
+            cleaned = cleaned[:997].rstrip() + "..."
 
         return cleaned
 

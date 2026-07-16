@@ -152,3 +152,15 @@ def test_converts_update_to_create_for_missing_file(
     assert (
         tmp_path / "src" / "lib" / "new-file.ts"
     ).exists()
+
+
+def test_truncates_long_file_explanation() -> None:
+    change = PlannedFileChange(
+        path="src/example.ts",
+        operation="create",
+        content="export const value = true;\n",
+        explanation="x" * 1500,
+    )
+
+    assert len(change.explanation) == 1000
+    assert change.explanation.endswith("...")

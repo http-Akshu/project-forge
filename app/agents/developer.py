@@ -255,6 +255,13 @@ repository files. Produce the smallest complete set of file changes required
 to satisfy the task.
 
 Rules:
+- Never import database modules, Drizzle database instances, better-sqlite3, Node.js fs/path modules, or server-only utilities into a Client Component.
+- Any file containing "use client" must access persisted data through API routes using fetch(), not through direct database imports.
+- Database access must remain inside API route handlers, Server Components, server actions, or modules explicitly marked with import "server-only".
+- When a client page needs customers, requests, or invoices, call the relevant /api endpoint and parse the JSON response.
+- Before returning changes, verify that every named import exactly matches an exported symbol in the target module.
+- Never import a function named getRequests or updateRequestStatus unless those exact exports exist in the imported file.
+- Fix all errors shown in the build output, not only the first reported error.
 - Implement only the current task.
 - Do not invent unrelated features.
 - Preserve working behavior.
@@ -294,6 +301,56 @@ Rules:
 - For Drizzle raw SQL queries, import and use the sql template from "drizzle-orm".
 - Verify generated tests against the actual APIs of the installed libraries.
 - Do not assume ORM methods accept raw strings unless the current library documentation confirms it.
+- For Drizzle sorting, use asc(column) or desc(column) imported from "drizzle-orm".
+- Never pass "asc" or "desc" as string arguments to orderBy().
+- Before returning code, verify that every identifier used in each file is imported or declared.
+- When using eq(), desc(), asc(), and(), or(), like(), or sql, import the required helper from "drizzle-orm".
+- For a TypeScript "Cannot find name" error, first inspect and correct the missing import.
+- Never remove a required expression merely to avoid adding its import.
+- If a route uses eq(requests.status, status), it must import eq from "drizzle-orm".
+- Never include a property in a Drizzle insert or update object unless that exact column exists in the imported Drizzle table schema.
+- Before calling .set(), inspect the table schema and use only its declared columns.
+- Do not invent updatedAt, createdAt, status, or other columns that are absent from the schema.
+- When a TypeScript error says an object contains an unknown property, remove that property unless the task explicitly requires adding the column and a database migration.
+
+For ServiceTracker:
+- src/app/requests/page.tsx is a Client Component.
+- It must fetch customers from /api/customers.
+- It must fetch and update service requests through /api/requests.
+- It must not import src/db/index.ts, src/lib/customers.ts, or any module that imports better-sqlite3.
+- Modules that directly import the database must begin with: import "server-only";
+
+- In Next.js App Router dynamic route handlers, params may be asynchronous.
+- Type dynamic route context as:
+  { params: Promise<{ id: string }> }
+- Resolve route parameters using:
+  const { id } = await params;
+- Never use:
+  { params: { id: string } }
+  in Next.js dynamic API route handlers.
+
+- When a Next.js build error says the route handler expects
+params: Promise<{ id: string }>, update the handler signature and await params.
+
+- Drizzle query-builder methods such as where(), limit(), offset(), and orderBy() are single-use in static mode.
+
+- When a query is built incrementally or conditionally through reassignment, call .$dynamic() immediately after the initial select query.
+
+- Correct conditional Drizzle pattern:
+
+  let query = db.select().from(table).$dynamic();
+
+  if (condition) {
+    query = query.where(eq(table.column, value));
+  }
+
+  const result = await query;
+
+- Never reassign a static Drizzle query after calling where(), orderBy(), limit(), or offset().
+
+- When TypeScript reports that a query property such as "where" is missing after reassignment, convert the query to dynamic mode with .$dynamic().
+
+For Drizzle SQLite conditional filters, use .$dynamic() before reassigning query = query.where(...).
 """
 
         user_prompt = f"""
@@ -563,7 +620,7 @@ Do not wrap the JSON in Markdown.
     - Do not remove tests merely to make validation pass.
     - Do not disable TypeScript, linting, or test rules.
     - Do not use @ts-ignore, eslint-disable, or test skipping unless the existing
-    project already uses it for a justified reason.
+    - project already uses it for a justified reason.
     - Never include secrets or modify .env files.
     - Use create only for missing files.
     - Use update only for existing files.
@@ -574,6 +631,65 @@ Do not wrap the JSON in Markdown.
     - Before choosing create or update, check whether the file exists in the supplied repository context.
     - Existing files must use update.
     - Missing files must use create.
+    - Keep each file explanation below 300 characters.
+    - Keep every file explanation brief and below 300 characters.
+    - For Drizzle sorting, use asc(column) or desc(column) imported from "drizzle-orm".
+    - Never pass "asc" or "desc" as string arguments to orderBy().
+    - Never import database modules, Drizzle database instances, better-sqlite3, Node.js fs/path modules, or server-only utilities into a Client Component.
+    - Any file containing "use client" must access persisted data through API routes using fetch(), not through direct database imports.
+    - Database access must remain inside API route handlers, Server Components, server actions, or modules explicitly marked with import "server-only".
+    - When a client page needs customers, requests, or invoices, call the relevant /api endpoint and parse the JSON response.
+    - Before returning changes, verify that every named import exactly matches an exported symbol in the target module.
+    - Never import a function named getRequests or updateRequestStatus unless those exact exports exist in the imported file.
+    - Fix all errors shown in the build output, not only the first reported error.
+    - Before returning code, verify that every identifier used in each file is imported or declared.
+    - When using eq(), desc(), asc(), and(), or(), like(), or sql, import the required helper from "drizzle-orm".
+    - For a TypeScript "Cannot find name" error, first inspect and correct the missing import.
+    - Never remove a required expression merely to avoid adding its import.
+    - If a route uses eq(requests.status, status), it must import eq from "drizzle-orm".
+    - When TypeScript reports "Cannot find name 'X'", inspect the failing file and add the correct import or declaration for X. Do not rewrite unrelated architecture.
+    - Never include a property in a Drizzle insert or update object unless that exact column exists in the imported Drizzle table schema.
+    - Before calling .set(), inspect the table schema and use only its declared columns.
+    - Do not invent updatedAt, createdAt, status, or other columns that are absent from the schema.
+    - When a TypeScript error says an object contains an unknown property, remove that property unless the task explicitly requires adding the column and a database migration.
+    
+    For ServiceTracker:
+    - src/app/requests/page.tsx is a Client Component.
+    - It must fetch customers from /api/customers.
+    - It must fetch and update service requests through /api/requests.
+    - It must not import src/db/index.ts, src/lib/customers.ts, or any module that imports better-sqlite3.
+    - Modules that directly import the database must begin with: import "server-only";
+    
+    - In Next.js App Router dynamic route handlers, params may be asynchronous.
+    - Type dynamic route context as:
+    { params: Promise<{ id: string }> }
+    - Resolve route parameters using:
+    const { id } = await params;
+    - Never use:
+    { params: { id: string } }
+    in Next.js dynamic API route handlers.
+    When a Next.js build error says the route handler expects
+    params: Promise<{ id: string }>, update the handler signature and await params.
+    
+    - Drizzle query-builder methods such as where(), limit(), offset(), and orderBy() are single-use in static mode.
+
+    - When a query is built incrementally or conditionally through reassignment, call .$dynamic() immediately after the initial select query.
+
+    - Correct conditional Drizzle pattern:
+
+    let query = db.select().from(table).$dynamic();
+
+    if (condition) {
+        query = query.where(eq(table.column, value));
+    }
+
+    const result = await query;
+
+    - Never reassign a static Drizzle query after calling where(), orderBy(), limit(), or offset().
+
+    - When TypeScript reports that a query property such as "where" is missing after reassignment, convert the query to dynamic mode with .$dynamic().
+
+    For Drizzle SQLite conditional filters, use .$dynamic() before reassigning query = query.where(...).
     """
 
         user_prompt = f"""
